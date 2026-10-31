@@ -11,7 +11,8 @@ registers are not used. Common GND and a 3.3 V sensor supply are expected.
 
 The firmware automatically reads `angle_pred_reg` at address `0x0C` at
 100 Hz and logs at 10 Hz. Scheduling is polling based, not a precision timer.
-Mode 1, MSB first, nominal 1 MHz. CS stays LOW for all four bytes.
+Mode 1, MSB first, nominal 1 MHz. MISO PA6 uses an internal pull-down.
+CS stays LOW for all four bytes, transferred in one SPI buffer call.
 The read request without clearing status is `18 00 00 E5` (manual p.29).
 The displayed angle is `raw * 360 / 65536`, range [0, 360) degrees.
 This is the predicted/interpolated angle, not the separate `angle_reg` at 0x0F.
@@ -20,28 +21,22 @@ This is the predicted/interpolated angle, not the separate `angle_reg` at 0x0F.
 
 1. Build and upload using PlatformIO.
 2. Open the ST-LINK virtual COM serial monitor at 115200 baud, LF line ending.
-3. Observe automatic output. Send `h` followed by Enter for command help.
+3. Observe automatic output: `angle_deg`, `raw`, `status`, `CRC`, status flags,
+   and the cumulative `crc_errors` count. No serial commands are implemented.
 4. Turn the magnet slowly. Confirm continuous angle changes and wrap near
    360 to 0 degrees. Returning to the same physical position should return
    near the previous angle. This verifies basic function, not absolute accuracy.
 
-Commands (each followed by Enter):
-
-| Command | Action |
-| --- | --- |
-| `a` | Resume automatic angle polling at address 0x0C |
-| `s` | Stop polling |
-| `r HEX` | Poll an in-frame register as raw data; address is hexadecimal |
-| `d` | Read diagnostic registers 0x00/0x01/0x03/0x05 and field magnitude 0x15 |
-| `c` | Explicitly clear latched OFC/DIAG/MAG/SUP/RST/OT status |
-| `h` | Print help |
+Timing constants are `SAMPLE_INTERVAL_MS` and `LOG_INTERVAL_MS` in `src/main.cpp`.
+The loop uses `millis()` instead of a blocking delay. Output shows the latest
+sample every 100 ms; intermediate samples are not logged. Each sample performs
+one frame, with one immediate retry if its CRC fails.
 
 ## Interpreting output
 
-`crc=OK` means the received frame CRC passed; it does not alone establish
+`CRC=OK` means the received frame CRC passed; it does not alone establish
 measurement health. A failed CRC is retried once. `crc_errors` counts failed
-frames, `recovered` counts successful retries, and `failed` counts reads for
-which both attempts failed. A failed read never supplies a displayed angle.
+frames, including failed retries. A failed read never supplies a displayed angle.
 
 `angle_deg=INVALID` means CRC failed, LFOK is zero, or DIAG/MAG/SUP/OT is set.
 Status bits are not trustworthy when CRC fails. LFOK describes the previous
@@ -49,11 +44,16 @@ MOSI frame. OFC records historical communication errors; RST is a reset
 indication; neither alone suppresses the displayed angle. CAL indicates
 SysCal state, not general sample validity.
 
-Status warnings can latch. Record `d` output before using `c`; the subsequent
-read, not the clear-response frame, shows the resulting status. A persistent
-fault can reassert. A MAG warning calls for checking magnet position, strength,
-and configured magnetic range. Register 0x15 field magnitude converts as
-`raw * 0.0064` mT when its CRC passes.
+Status warnings can latch; this firmware does not clear them automatically.
+A MAG warning calls for checking magnet position, strength, and configured
+magnetic range. Status flags printed with `CRC=FAIL` are untrusted.
+
+## Power wiring
+
+Verify voltage at the IC, not only the PCB connector: pin 4 (VDD) to pin 2 (GND)
+must have the intended 3.3 V supply. Pin 3 is VPROG, not VDD; in normal operation
+use the datasheet's GND or unconnected configuration for VPROG. The previous PCB
+connected 3.3 V to VPROG while leaving VDD unpowered, which prevented SPI operation.
 
 All-zero/all-one responses, repeated CRC failures, or LFOK remaining zero call
 for checking supply, common ground, CS, Mode 1, and wiring. A logic analyzer

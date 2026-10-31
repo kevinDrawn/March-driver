@@ -1,58 +1,97 @@
 #pragma once
 #include <Arduino.h>
 #include <SPI.h>
+#include "Tli49012_registers.h"
 
 class Tli49012 {
-public:
-  // User manual rev. 1.00: sections 8.1 and 8.2.11.
-  static constexpr uint8_t AngleAddress = 0x0c;
-  static constexpr float toDegrees(uint16_t raw) {
-    return raw * (360.0f / 65536.0f);
-  }
-  struct Result {
-    uint16_t data;
-    uint8_t status;
-    bool crcOk;
-    uint8_t rx[4];
-  };
-  Tli49012(SPIClass &spi, uint32_t cs) : spi_(spi), cs_(cs) {}
-  void begin() {
-    digitalWrite(cs_, HIGH);
-    pinMode(cs_, OUTPUT);
-    spi_.begin();
-  }
-  Result readAngle() { return readRegister(AngleAddress); }
-  // clearMask: explicit write-one-to-clear device status request (not NVM).
-  Result readRegister(uint8_t address, uint8_t clearMask = 0) {
-    Result r{};
-    if (address > 0x79) return r;
-    uint8_t tx[] = {static_cast<uint8_t>(address << 1), 0, clearMask, 0};
-    tx[3] = crc8(tx, 3);
-    spi_.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
-    delayMicroseconds(1); // CS high >= 500 ns
-    digitalWrite(cs_, LOW);
-    delayMicroseconds(1); // lead >= 100 ns
-    for (size_t i = 0; i < 4; ++i) r.rx[i] = spi_.transfer(tx[i]);
-    delayMicroseconds(1); // lag >= 100 ns
-    digitalWrite(cs_, HIGH);
-    spi_.endTransaction();
-    const uint8_t payload[] = {static_cast<uint8_t>(tx[0] >> 1), r.rx[0], r.rx[1], r.rx[2]};
-    r.crcOk = crc8(payload, 4) == r.rx[3];
-    r.status = r.rx[0];
-    r.data = (static_cast<uint16_t>(r.rx[1]) << 8) | r.rx[2];
-    return r;
-  }
-private:
-  static uint8_t crc8(const uint8_t *data, size_t count) {
-    uint8_t crc = 0xff;
-    for (size_t i = 0; i < count; ++i) {
-      crc ^= data[i];
-      for (uint8_t bit = 0; bit < 8; ++bit)
-        crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x1d)
-                           : static_cast<uint8_t>(crc << 1);
-    }
-    return crc ^ 0xff;
-  }
-  SPIClass &spi_;
-  uint32_t cs_;
+    public:
+        Tli49012(SPIClass &spi, uint32_t cs, uint32_t sync) : spi_(spi), cs_(cs), sync_(sync) {};
+    
+        bool begin(){
+            digitalWrite(cs_, HIGH);
+            digitalWrite(sync_, LOW);
+            pinMode(cs_, OUTPUT);
+            pinMode(sync_, OUTPUT);
+            spi_.begin();
+            delay(2); 
+            
+            // WHO AM I
+            const Result result = readRegister(TLI49012_REG_HW_FW_ID);
+            return result.crcOk && result.data == TLI49012_EXPECTED_HW_FW_ID; 
+        }
+        
+        struct Result {
+            uint8_t status=0;
+            uint16_t data=0;
+            bool crcOk = false;
+            float angleDeg = 0.0f;
+        };
+
+        Result readRegister(uint16_t address){
+            Result result{};
+            if (address > 0x79) return result;
+            uint8_t tx[4] ={
+                static_cast<uint8_t>(address << 1),
+                0x00,
+                0x00,
+                0x00
+            };
+            tx[3] = crc8(tx, 3);
+            uint8_t rx[4]{};
+            transferFrame(tx, rx);
+            result.status = rx[0];
+            result.data = (static_cast<uint16_t>(rx[1]) << 8) | rx[2];
+            const uint8_t payload[4] = {
+                static_cast<uint8_t>(tx[0] >> 1),
+                rx[0], rx[1], rx[2]
+            };
+            result.crcOk = crc8(payload, 4) == rx[3];
+            return result;
+        }
+
+        Result readAngle() {
+            
+            Result result = readRegister(TLI49012_REG_ANGLE_PRED);
+            if (result.crcOk){
+                result.angleDeg = toDegress(result.data);
+            }
+
+            return result;
+        }
+
+    private:
+        SPIClass &spi_;
+        uint32_t cs_;
+        uint32_t sync_;
+
+        static uint8_t crc8(const uint8_t *data, size_t length){
+            uint8_t crc=0xFF;
+            for(size_t i=0; i<length; ++i){
+                crc ^= data[i];
+                for(uint8_t bit =0; bit < 8; ++bit){
+                    if(crc & 0x80){
+                        crc = static_cast<uint8_t>((crc << 1) ^ 0x1D);
+                    } else {
+                        crc = static_cast<uint8_t>((crc << 1));
+                    }
+                }
+            }
+            return static_cast<uint8_t>(crc ^0xFF);
+        }
+
+        void transferFrame(const uint8_t *tx, uint8_t *rx){
+            spi_.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
+            delayMicroseconds(1);
+            digitalWrite(cs_, LOW);
+            delayMicroseconds(1);
+
+            spi_.transfer(tx, rx, 4);
+            delayMicroseconds(1);
+            digitalWrite(cs_, HIGH);
+            spi_.endTransaction();
+        }
+
+        static float toDegress(uint16_t raw){
+            return static_cast<float>(raw) * 360.0f / 65536.0f;
+        }
 };
